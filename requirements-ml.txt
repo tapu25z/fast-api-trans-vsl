@@ -1,0 +1,7 @@
+-r requirements.txt
+torch>=2.6,<3
+torchvision>=0.21,<1
+transformers>=4.49,<5
+huggingface-hub>=0.29,<2
+opencv-python-headless>=4.10,<5
+Pillow>=11,<13

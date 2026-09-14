@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+tmp/
+.DS_Store
+api.txt
+data/kaggle_dataset/
+static/generated/*.mp4

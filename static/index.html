@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignMate VSL API Demo</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; background: #f4f7fb; color: #152033; }
+    body { max-width: 900px; margin: 0 auto; padding: 32px 18px 64px; }
+    h1 { margin-bottom: 6px; } .muted { color: #61708a; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(300px,1fr)); gap: 18px; margin-top: 24px; }
+    section { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 8px 30px #1b39630d; }
+    textarea, input { width: 100%; box-sizing: border-box; border: 1px solid #cfd8e7; border-radius: 9px; padding: 11px; font: inherit; }
+    button { margin-top: 10px; border: 0; border-radius: 9px; padding: 10px 15px; background: #1769e0; color: white; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #475467; }
+    .divider { border-top: 1px solid #e4e9f1; margin: 18px 0 14px; padding-top: 14px; }
+    .results { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+    .sign { padding: 9px 11px; border-radius: 9px; background: #eaf2ff; }
+    .sign small { display: block; color: #5e6c80; margin-top: 3px; }
+    .warning { color: #985b00; margin-top: 12px; font-size: 14px; }
+    video { width: 100%; margin-top: 14px; border-radius: 10px; background: #101828; }
+  </style>
+</head>
+<body>
+  <h1>SignMate - VSL Translator MVP</h1>
+  <p class="muted">Demo từ/cụm từ tiếng Việt ↔ nhãn ký hiệu VSL. Mở <a href="/docs">/docs</a> để thử toàn bộ API.</p>
+  <main class="grid">
+    <section>
+      <h2>Speech hoặc Text → video VSL</h2>
+      <p class="muted">Nhập câu hoặc nói bằng tiếng Việt.</p>
+      <textarea id="text" rows="4">Xin lỗi</textarea>
+      <button onclick="textToVslVideo()">Dùng nội dung đã nhập</button>
+      <div class="divider">
+        <button id="record-button" class="secondary" onclick="toggleRecording()">🎙️ Bắt đầu ghi âm</button>
+        <p class="muted">Hoặc chọn file ghi âm:</p>
+        <input id="speech-file" type="file" accept="audio/*,video/mp4,video/webm">
+        <button class="secondary" onclick="speechFileToVsl()">Nhận giọng nói và tạo VSL</button>
+      </div>
+      <div id="vsl-result" class="results"></div>
+      <div id="vsl-warning" class="warning"></div>
+      <video id="vsl-video" controls hidden></video>
+    </section>
+    <section>
+      <h2>Video VSL → Text</h2>
+      <p class="muted">Chọn video có một hoặc nhiều ký hiệu. Nếu biết số ký hiệu, nhập để tách chính xác hơn.</p>
+      <input id="video" type="file" accept="video/*">
+      <label for="expected-signs"><p class="muted">Số ký hiệu (0 = tự động)</p></label>
+      <input id="expected-signs" type="number" min="0" max="30" value="0">
+      <button onclick="videoToText()">Nhận diện và tạo câu</button>
+      <div id="video-result" class="results"></div>
+    </section>
+  </main>
+  <script>
+    async function post(url, body) {
+      const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(JSON.stringify(data));
+      return data;
+    }
+    function showVslResult(data) {
+      const output = document.querySelector('#vsl-result');
+      const warning = document.querySelector('#vsl-warning');
+      const video = document.querySelector('#vsl-video');
+      output.innerHTML = data.clips.map(x => `<div class="sign"><strong>${x.label}</strong><small>${x.filename}</small></div>`).join('');
+      const transcript = data.transcript ? `Đã nghe: “${data.transcript}”. ` : '';
+      warning.textContent = transcript + (data.unknown_words.length ? `Chưa có video: ${data.unknown_words.join(', ')}` : `AI: ${data.model}`);
+      if (data.transcript) document.querySelector('#text').value = data.transcript;
+      video.src = `${data.video_url}?v=${Date.now()}`;
+      video.hidden = false;
+    }
+    async function textToVslVideo() {
+      const output = document.querySelector('#vsl-result');
+      const warning = document.querySelector('#vsl-warning');
+      const video = document.querySelector('#vsl-video');
+      output.textContent = 'Ollama Cloud đang chuẩn hóa và ghép video...';
+      warning.textContent = '';
+      video.hidden = true;
+      try {
+        const data = await post('/api/v1/translate/text-to-vsl-video', {
+          text: document.querySelector('#text').value
+        });
+        showVslResult(data);
+      } catch (error) {
+        output.textContent = '';
+        warning.textContent = error.message;
+      }
+    }
+    async function speechBlobToVsl(blob, filename) {
+      const output = document.querySelector('#vsl-result');
+      const warning = document.querySelector('#vsl-warning');
+      const video = document.querySelector('#vsl-video');
+      output.textContent = 'Đang nhận giọng nói, chuẩn hóa và ghép video...';
+      warning.textContent = 'Lần đầu sẽ tải model Whisper và có thể mất vài phút.';
+      video.hidden = true;
+      const form = new FormData();
+      form.append('file', blob, filename);
+      try {
+        const response = await fetch('/api/v1/translate/speech-to-vsl-video', {method:'POST', body:form});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || JSON.stringify(data));
+        showVslResult(data);
+      } catch (error) {
+        output.textContent = '';
+        warning.textContent = error.message;
+      }
+    }
+    async function speechFileToVsl() {
+      const file = document.querySelector('#speech-file').files[0];
+      if (!file) { document.querySelector('#vsl-warning').textContent = 'Hãy chọn một file ghi âm.'; return; }
+      await speechBlobToVsl(file, file.name);
+    }
+    let recorder = null;
+    let microphoneStream = null;
+    let recordedChunks = [];
+    async function toggleRecording() {
+      const button = document.querySelector('#record-button');
+      if (recorder && recorder.state === 'recording') {
+        recorder.stop();
+        button.textContent = '🎙️ Bắt đầu ghi âm';
+        return;
+      }
+      try {
+        microphoneStream = await navigator.mediaDevices.getUserMedia({audio: true});
+        recordedChunks = [];
+        recorder = new MediaRecorder(microphoneStream);
+        recorder.ondataavailable = event => { if (event.data.size) recordedChunks.push(event.data); };
+        recorder.onstop = async () => {
+          microphoneStream.getTracks().forEach(track => track.stop());
+          const blob = new Blob(recordedChunks, {type: recorder.mimeType || 'audio/webm'});
+          await speechBlobToVsl(blob, 'recording.webm');
+        };
+        recorder.start();
+        button.textContent = '⏹ Dừng và dịch';
+        document.querySelector('#vsl-warning').textContent = 'Đang ghi âm...';
+      } catch (error) {
+        document.querySelector('#vsl-warning').textContent = `Không mở được micro: ${error.message}`;
+      }
+    }
+    async function videoToText() {
+      const file = document.querySelector('#video').files[0];
+      const output = document.querySelector('#video-result');
+      if (!file) { output.textContent = 'Hãy chọn một video.'; return; }
+      output.textContent = 'Đang tách đoạn, nhận diện ký hiệu và tạo câu...';
+      const form = new FormData();
+      form.append('file', file);
+      form.append('segment_seconds', '4');
+      form.append('expected_signs', document.querySelector('#expected-signs').value || '0');
+      form.append('min_confidence', '0.35');
+      try {
+        const response = await fetch('/api/v1/translate/video-to-text', {method:'POST', body:form});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || JSON.stringify(data));
+        const details = data.segments.map(x => `${x.index + 1}. ${x.label}: ${(x.confidence*100).toFixed(1)}%${x.accepted ? '' : ' (bỏ)'}`).join('<br>');
+        output.innerHTML = `<div class="sign"><strong>${data.text}</strong><small>Nhãn: ${data.labels.join(' → ')}<br>${details}</small></div>`;
+      } catch (error) { output.textContent = error.message; }
+    }
+  </script>
+</body>
+</html>
