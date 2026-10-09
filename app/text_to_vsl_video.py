@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import subprocess
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -20,6 +21,10 @@ class DatasetUnavailable(RuntimeError):
 
 
 class VideoAssemblyError(RuntimeError):
+    pass
+
+
+class UnknownLearningSign(ValueError):
     pass
 
 
@@ -119,8 +124,11 @@ def assemble_videos(clips: list[dict], cache_key: str) -> Path:
         raise VideoAssemblyError("Không có video để ghép")
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     output = GENERATED_DIR / f"{cache_key}.mp4"
-    if output.is_file():
+    if output.is_file() and output.stat().st_size > 0:
         return output
+    # Publish only complete files: concurrent requests must not stream an MP4
+    # while ffmpeg is still writing it.
+    temporary_output = GENERATED_DIR / f"{cache_key}-{uuid.uuid4().hex}.tmp.mp4"
     try:
         import imageio_ffmpeg
 
@@ -155,23 +163,50 @@ def assemble_videos(clips: list[dict], cache_key: str) -> Path:
             "yuv420p",
             "-movflags",
             "+faststart",
-            str(output),
+            str(temporary_output),
         ]
     )
     try:
         subprocess.run(command, check=True, capture_output=True, timeout=180)
+        temporary_output.replace(output)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        output.unlink(missing_ok=True)
         detail = getattr(exc, "stderr", b"")
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", errors="replace")[-1000:]
         raise VideoAssemblyError(f"Không ghép được video: {detail}") from exc
+    except OSError as exc:
+        raise VideoAssemblyError("Không thể lưu video đã tạo") from exc
+    finally:
+        temporary_output.unlink(missing_ok=True)
     return output
 
 
 class TextToVSLVideoService:
     def __init__(self) -> None:
         self.dictionary = KaggleVSLDictionary()
+
+    def translate_exact(self, text: str) -> dict:
+        # Lessons must not substitute similar words or let an LLM rewrite a letter.
+        # The dataset explicitly labels zero as "0 (số không)".
+        key = normalized_key(text)
+        key = {"0": normalized_key("0 (số không)")}.get(key, key)
+        try:
+            entry = self.dictionary._load().get(key)
+        except OSError as exc:
+            raise DatasetUnavailable("Không đọc được từ điển video VSL") from exc
+        if not entry:
+            raise UnknownLearningSign("Chưa có video khớp chính xác với ký hiệu này")
+        clips = self.dictionary.resolve([entry["label"]])
+        digest = hashlib.sha256(clips[0]["filename"].encode("utf-8")).hexdigest()[:20]
+        output = assemble_videos(clips, digest)
+        return {
+            "normalized_text": text,
+            "labels": [entry["label"]],
+            "unknown_words": [],
+            "model": "dataset-exact",
+            "clips": [{"label": entry["label"], "filename": clips[0]["filename"]}],
+            "video_url": f"/static/generated/{output.name}",
+        }
 
     def translate(self, text: str) -> dict:
         candidates = self.dictionary.candidates(text)

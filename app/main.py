@@ -12,7 +12,9 @@ from starlette.concurrency import run_in_threadpool
 from app.ollama_normalizer import OllamaCloudError
 from app.recognizer import RecognizerUnavailable, VideoDecodeError, recognizer
 from app.speech_recognizer import AudioDecodeError, SpeechRecognizerUnavailable, speech_recognizer
-from app.text_to_vsl_video import DatasetUnavailable, VideoAssemblyError, text_to_vsl_video_service
+from app.text_to_vsl_video import (
+    DatasetUnavailable, UnknownLearningSign, VideoAssemblyError, text_to_vsl_video_service,
+)
 from app.video_to_text import NoSignsRecognized, video_to_text_service
 
 
@@ -50,6 +52,7 @@ class VideoToTextResponse(BaseModel):
 
 class TextToVSLVideoRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1_000)
+    exact: bool = False
 
     @field_validator("text")
     @classmethod
@@ -135,7 +138,11 @@ def speech_model_status() -> dict:
 )
 def translate_text_to_vsl_video(payload: TextToVSLVideoRequest) -> TextToVSLVideoResponse:
     try:
+        if payload.exact:
+            return TextToVSLVideoResponse(**text_to_vsl_video_service.translate_exact(payload.text))
         return TextToVSLVideoResponse(**text_to_vsl_video_service.translate(payload.text))
+    except UnknownLearningSign as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except OllamaCloudError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except DatasetUnavailable as exc:

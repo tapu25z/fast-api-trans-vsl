@@ -7,9 +7,11 @@ import unicodedata
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env", override=False)
 DEFAULT_MODEL = "gpt-oss:120b"
 
 
@@ -31,7 +33,7 @@ def get_api_key() -> str:
     if key_file.is_file():
         key = key_file.read_text(encoding="utf-8").strip()
     if not key:
-        raise OllamaCloudError("Thiếu OLLAMA_API_KEY hoặc file api.txt")
+        raise OllamaCloudError("Thiếu OLLAMA_API_KEY: điền key vào .env, biến môi trường hoặc file api.txt")
     return key
 
 

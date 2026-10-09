@@ -5,5 +5,9 @@ __pycache__/
 tmp/
 .DS_Store
 api.txt
+.env
+.env.*
+!.env.example
 data/kaggle_dataset/
 static/generated/*.mp4
+data/kaggle_download/
