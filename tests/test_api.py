@@ -114,3 +114,42 @@ def test_dictionary_longest_match() -> None:
     matched, unknown = KaggleVSLDictionary().longest_matches("Tôi đi học")
     assert matched == ["đi học"]
     assert unknown == ["tôi"]
+
+
+def test_vocabulary_summary() -> None:
+    response = client.get("/api/v1/vocabulary/summary")
+    assert response.status_code == 200
+    data = response.json()
+    assert "dictionary_count" in data
+    assert data["dictionary_count"] > 0
+    assert "recognition_count" in data
+
+
+def test_segment_sentence() -> None:
+    response = client.post(
+        "/api/v1/translate/segment-sentence",
+        json={"text": "Tôi đi học"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["original_text"] == "Tôi đi học"
+    assert len(data["tokens"]) > 0
+
+
+def test_smart_crop_frame() -> None:
+    import numpy as np
+    from app.video_preprocessor import smart_crop_frame
+
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cropped = smart_crop_frame(frame, focus_x=0.7)
+    assert cropped.shape == (720, 720, 3)
+
+
+def test_video_mp4_transcribes_to_benh_nhan() -> None:
+    from pathlib import Path
+    sample = Path(__file__).resolve().parent.parent.parent / "video.mp4"
+    if sample.is_file():
+        from app.video_to_text import video_to_text_service
+        result = video_to_text_service.translate(sample, min_confidence=0.4)
+        assert "Bệnh nhân" in result["labels"] or "bệnh nhân" in result["text"].lower()
+

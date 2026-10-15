@@ -9,11 +9,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
-from app.ollama_normalizer import OllamaCloudError
-from app.recognizer import RecognizerUnavailable, VideoDecodeError, recognizer
+from app.ollama_normalizer import OllamaCloudError, normalized_key
+from app.recognizer import (
+    ALL_RECOGNITION_LABELS, LABEL_CORRECTIONS, RecognizerUnavailable,
+    VideoDecodeError, recognizer,
+)
 from app.speech_recognizer import AudioDecodeError, SpeechRecognizerUnavailable, speech_recognizer
 from app.text_to_vsl_video import (
-    DatasetUnavailable, UnknownLearningSign, VideoAssemblyError, text_to_vsl_video_service,
+    FRONTEND_DATA_DIR, FULL_DATA_DIR, DatasetUnavailable, UnknownLearningSign,
+    VideoAssemblyError, text_to_vsl_video_service,
 )
 from app.video_to_text import NoSignsRecognized, video_to_text_service
 
@@ -75,6 +79,36 @@ class TextToVSLVideoResponse(BaseModel):
     model: str
     clips: list[VSLVideoClip]
     video_url: str
+
+
+class SegmentSentenceRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("text không được để trống")
+        return value
+
+
+class SentenceToken(BaseModel):
+    text: str
+    supported: bool
+    label: str
+    filename: str | None = None
+    video_url: str | None = None
+    suggestions: list[str] = []
+
+
+class SegmentSentenceResponse(BaseModel):
+    original_text: str
+    normalized_text: str
+    tokens: list[SentenceToken]
+    supported_count: int
+    unsupported_count: int
+    all_supported: bool
 
 
 class SpeechToVSLVideoResponse(TextToVSLVideoResponse):
@@ -217,3 +251,120 @@ async def translate_video_to_text(
         raise HTTPException(status_code=503, detail=f"Model chưa sẵn sàng: {exc}") from exc
     except OllamaCloudError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/vocabulary/summary", tags=["vocabulary"])
+def get_vocabulary_summary() -> dict:
+    dictionary = text_to_vsl_video_service.dictionary._load()
+    sample_words = [item["label"] for item in list(dictionary.values())[:30]]
+    return {
+        "dictionary_count": len(dictionary),
+        "recognition_count": len(ALL_RECOGNITION_LABELS),
+        "sample_words": sample_words,
+        "recognition_labels": ALL_RECOGNITION_LABELS,
+    }
+
+
+@app.get("/api/v1/vocabulary/search", tags=["vocabulary"])
+def search_vocabulary(q: str = "", limit: int = 30) -> list[dict]:
+    query = q.strip()
+    if not query:
+        return []
+    candidates = text_to_vsl_video_service.dictionary.candidates(query, limit=limit)
+    labels_dict = text_to_vsl_video_service.dictionary._load()
+    items = []
+    for candidate in candidates:
+        key = normalized_key(candidate)
+        entry = labels_dict.get(key)
+        if entry and entry["videos"]:
+            filename = entry["videos"][0]
+            items.append({
+                "label": entry["label"],
+                "filename": filename,
+                "video_url": f"/api/v1/videos/clips/{filename}",
+            })
+    return items
+
+
+@app.get("/api/v1/vocabulary/word/{word}", tags=["vocabulary"])
+def lookup_word(word: str) -> dict:
+    word = word.strip()
+    key = normalized_key(word)
+    labels_dict = text_to_vsl_video_service.dictionary._load()
+    entry = labels_dict.get(key)
+    if entry and entry["videos"]:
+        filename = entry["videos"][0]
+        return {
+            "label": entry["label"],
+            "filename": filename,
+            "video_url": f"/api/v1/videos/clips/{filename}",
+            "suggestions": [],
+        }
+    suggestions = text_to_vsl_video_service.dictionary.candidates(word, limit=6)
+    return {
+        "label": word,
+        "filename": None,
+        "video_url": None,
+        "suggestions": suggestions,
+    }
+
+
+@app.post(
+    "/api/v1/translate/segment-sentence",
+    response_model=SegmentSentenceResponse,
+    tags=["speech-or-text-to-vsl"],
+    summary="Phân tích câu thành chuỗi ký hiệu VSL",
+)
+def segment_sentence(payload: SegmentSentenceRequest) -> SegmentSentenceResponse:
+    text = payload.text.strip()
+    matched_units, unknown = text_to_vsl_video_service.dictionary.longest_matches(text)
+    labels_dict = text_to_vsl_video_service.dictionary._load()
+    tokens = []
+    for unit in matched_units:
+        key = normalized_key(unit)
+        entry = labels_dict.get(key)
+        filename = entry["videos"][0] if entry and entry["videos"] else None
+        tokens.append(
+            SentenceToken(
+                text=unit,
+                supported=True,
+                label=unit,
+                filename=filename,
+                video_url=f"/api/v1/videos/clips/{filename}" if filename else None,
+                suggestions=[],
+            )
+        )
+    for unk in unknown:
+        suggestions = text_to_vsl_video_service.dictionary.candidates(unk, limit=4)
+        tokens.append(
+            SentenceToken(
+                text=unk,
+                supported=False,
+                label=unk,
+                filename=None,
+                video_url=None,
+                suggestions=suggestions,
+            )
+        )
+    supported_count = sum(1 for t in tokens if t.supported)
+    unsupported_count = len(tokens) - supported_count
+    return SegmentSentenceResponse(
+        original_text=text,
+        normalized_text=text,
+        tokens=tokens,
+        supported_count=supported_count,
+        unsupported_count=unsupported_count,
+        all_supported=unsupported_count == 0,
+    )
+
+
+@app.api_route("/api/v1/videos/clips/{filename}", methods=["GET", "HEAD"], tags=["videos"])
+def get_video_clip(filename: str):
+    safe_filename = Path(filename).name
+    clip_path = FULL_DATA_DIR / safe_filename
+    if clip_path.is_file() and clip_path.stat().st_size > 0:
+        return FileResponse(clip_path, media_type="video/mp4")
+    frontend_path = FRONTEND_DATA_DIR / safe_filename
+    if frontend_path.is_file() and frontend_path.stat().st_size > 0:
+        return FileResponse(frontend_path, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Clip không tồn tại")

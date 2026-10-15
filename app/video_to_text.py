@@ -3,8 +3,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from app.ollama_normalizer import ollama_normalizer
+from app.landmark_verifier import landmark_verifier
+from app.ollama_normalizer import OllamaCloudError, ollama_normalizer
 from app.recognizer import VideoDecodeError, recognizer
+from app.video_preprocessor import hand_activity_detector
 
 
 class NoSignsRecognized(RuntimeError):
@@ -39,21 +41,47 @@ class VideoToTextService:
         if duration > 120:
             raise VideoDecodeError("Video tối đa 120 giây")
 
+        analysis = hand_activity_detector.analyze_hands(path)
+        if not analysis.get("has_hands", True):
+            raise NoSignsRecognized(
+                "Chưa phát hiện thấy bàn tay trong video. Vui lòng quay rõ nửa thân trên và hai bàn tay."
+            )
+
+        active_start = float(analysis.get("overall_start", 0.0))
+        active_end = float(analysis.get("overall_end", duration))
+        focus_x = float(analysis.get("hand_center_x", 0.5))
+
+        if active_end > active_start + 0.3:
+            active_duration = active_end - active_start
+        else:
+            active_start = 0.0
+            active_end = duration
+            active_duration = duration
+
         if expected_signs > 0:
             segment_count = expected_signs
         else:
-            segment_count = max(1, int(math.floor(duration / segment_seconds + 0.5)))
+            segment_count = max(1, int(math.floor(active_duration / segment_seconds + 0.5)))
         segment_count = min(segment_count, 30)
-        actual_segment_seconds = duration / segment_count
+        actual_segment_seconds = active_duration / segment_count
 
         segments = []
         labels = []
+        best_unaccepted_label: str | None = None
+        best_unaccepted_confidence: float = 0.0
+
         for index in range(segment_count):
-            start = index * actual_segment_seconds
-            end = duration if index == segment_count - 1 else (index + 1) * actual_segment_seconds
-            predictions = recognizer.predict_interval(path, start, end, top_k=3)
+            start = active_start + index * actual_segment_seconds
+            end = active_end if index == segment_count - 1 else active_start + (index + 1) * actual_segment_seconds
+            predictions = recognizer.predict_interval(
+                path, start, end, top_k=3, focus_x=focus_x
+            )
             best = predictions[0]
             accepted = best.confidence >= min_confidence
+            if not accepted and best.confidence > best_unaccepted_confidence:
+                best_unaccepted_confidence = best.confidence
+                best_unaccepted_label = best.label
+
             segments.append(
                 {
                     "index": index,
@@ -72,10 +100,35 @@ class VideoToTextService:
                 labels.append(best.label)
 
         if not labels:
-            raise NoSignsRecognized(
-                "Không có đoạn nào đạt ngưỡng tin cậy; hãy giảm min_confidence hoặc chỉnh expected_signs"
+            verified = landmark_verifier.verify(
+                path,
+                candidate_labels=[best_unaccepted_label] if best_unaccepted_label else None,
             )
-        text = ollama_normalizer.labels_to_text(labels)
+            if verified:
+                v_label, v_conf = verified
+                labels.append(v_label)
+                if segments:
+                    segments[0]["label"] = v_label
+                    segments[0]["confidence"] = v_conf
+                    segments[0]["accepted"] = True
+                    segments[0]["top_predictions"].insert(
+                        0, {"label": v_label, "confidence": v_conf}
+                    )
+
+        if not labels:
+            tip = ""
+            if best_unaccepted_label:
+                tip = f" (gần giống '{best_unaccepted_label}' với độ tin cậy {best_unaccepted_confidence * 100:.1f}%)"
+            raise NoSignsRecognized(
+                f"Không có cử chỉ nào đạt ngưỡng tin cậy {min_confidence * 100:.0f}%{tip}. "
+                "Hãy hạ ngưỡng tin cậy trên thanh trượt hoặc thực hiện cử chỉ thuộc 100 từ vựng hỗ trợ."
+            )
+        try:
+            text = ollama_normalizer.labels_to_text(labels)
+            language_model = ollama_normalizer.model
+        except OllamaCloudError:
+            text = ", ".join(labels)
+            language_model = "raw-labels-fallback"
         return {
             "text": text,
             "labels": labels,
@@ -83,7 +136,7 @@ class VideoToTextService:
             "duration_seconds": round(duration, 3),
             "segment_seconds": round(actual_segment_seconds, 3),
             "recognition_model": recognizer.model_name,
-            "language_model": ollama_normalizer.model,
+            "language_model": language_model,
         }
 
 

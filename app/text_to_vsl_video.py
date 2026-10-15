@@ -13,6 +13,7 @@ from app.ollama_normalizer import OllamaCloudError, normalized_key, ollama_norma
 BASE_DIR = Path(__file__).resolve().parent.parent
 LABELS_FILE = BASE_DIR / "data" / "kaggle_metadata" / "labels.csv"
 FULL_DATA_DIR = BASE_DIR / "data" / "kaggle_dataset" / "videos"
+FRONTEND_DATA_DIR = BASE_DIR.parent / "AISC2026-SignMate_Frontend" / "public" / "videos" / "vsl"
 GENERATED_DIR = BASE_DIR / "static" / "generated"
 
 
@@ -107,6 +108,9 @@ class KaggleVSLDictionary:
         video = FULL_DATA_DIR / filename
         if video.is_file() and video.stat().st_size > 0:
             return video
+        frontend_video = FRONTEND_DATA_DIR / filename
+        if frontend_video.is_file() and frontend_video.stat().st_size > 0:
+            return frontend_video
         raise DatasetUnavailable(
             f"Thiếu {filename}; hãy tải dataset vào data/kaggle_dataset/videos"
         )
@@ -210,7 +214,16 @@ class TextToVSLVideoService:
 
     def translate(self, text: str) -> dict:
         candidates = self.dictionary.candidates(text)
-        normalized = ollama_normalizer.normalize(text, candidates)
+        try:
+            normalized = ollama_normalizer.normalize(text, candidates)
+        except OllamaCloudError:
+            matched, unknown = self.dictionary.longest_matches(text)
+            normalized = {
+                "normalized_text": text,
+                "units": matched,
+                "unknown_words": unknown,
+                "model": "longest-match-fallback",
+            }
         if not normalized["units"]:
             fallback_units, fallback_unknown = self.dictionary.longest_matches(text)
             normalized["units"] = fallback_units

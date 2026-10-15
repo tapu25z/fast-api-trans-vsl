@@ -5,6 +5,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.video_preprocessor import smart_crop_frame
+
 
 MODEL_NAME = "star092304/vi-sign-language-videomae-base"
 
@@ -53,6 +55,24 @@ LABEL_CORRECTIONS = {
 
 def clean_label(label: str) -> str:
     return LABEL_CORRECTIONS.get(label, label)
+
+
+RAW_MODEL_LABELS = [
+    'An ủi', 'Ban ngÖy', 'Ban đêm', 'Biết', 'Biếu tặng', 'BÖn tay', 'Băn khoăn', 'Bạn thân',
+    'Bế mạc', 'Bệnh nhân', 'Bệnh viện', 'Bộ y tế', 'Chiều', 'Cho', 'Ch£ng ta', 'ChÉn',
+    'ChÖo', 'Chạy', 'Chấp nhận', 'Chậm lại', 'Con gấu', 'Cám dỗ', 'Có thể', 'Cơ thể',
+    'Cảm ơn', 'Cần', 'Cứu', 'C†', 'C†ch ly', 'Dạy dỗ', 'Dễ', 'GhÇt', 'Gi£p', 'Ho',
+    'Hy sinh', 'Hâm mộ', 'Hìm nay', 'Họ', 'Học sinh', 'Khai b†o', 'Khu c†ch ly', 'Kh¢c',
+    'Khẩu trang', 'Kết hôn', 'Lo lắng', 'Lây bệnh', 'Mua', 'Mời vào', 'Nghe', 'Nghỉ ngơi',
+    'Ng¢n tay', 'NhÖ', 'Nhçn', 'Nhầm', 'Nhớ', 'N¢i', 'Nìn ¢i', 'Nói xấu', 'Nặng',
+    'Ph°a sau', 'Phạt', 'Phỏng vấn', 'Phục hồi', 'Rau', 'Rẽ phải', 'Rẽ trái', 'San sẻ',
+    'Sốt', 'Sử dụng', 'Th°ch', 'Thăm', 'Thương', 'Thất lạc', 'Thức dậy', 'Thức ăn',
+    'Trưa', 'Trường học', 'Tìi', 'Tập luyện', 'Tối', 'Uống', 'Virus', 'Vâng lời',
+    'Xa', 'Xe m†y', 'Xe đạp', 'Xin lỗi', 'Xin phÇp', 'Xuất viện', 'Xúc động', 'Áp dụng',
+    'Ô tô', 'Ăn', 'Ăn mừng', 'Đi', 'Đâu', 'Đầu', 'Đẹp', 'Đồng ý', 'Ủng hộ'
+]
+
+ALL_RECOGNITION_LABELS = [clean_label(lbl) for lbl in RAW_MODEL_LABELS]
 
 
 class VideoMAEVSLRecognizer:
@@ -137,6 +157,7 @@ class VideoMAEVSLRecognizer:
         frame_count: int = 16,
         start_seconds: float | None = None,
         end_seconds: float | None = None,
+        focus_x: float = 0.5,
     ) -> list:
         try:
             import cv2
@@ -165,7 +186,8 @@ class VideoMAEVSLRecognizer:
                 capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
                 ok, frame = capture.read()
                 if ok:
-                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    cropped = smart_crop_frame(frame, focus_x=focus_x)
+                    frames.append(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
         capture.release()
 
         if len(frames) < 2:
@@ -180,12 +202,14 @@ class VideoMAEVSLRecognizer:
         start_seconds: float | None,
         end_seconds: float | None,
         top_k: int = 5,
+        focus_x: float = 0.5,
     ) -> list[Prediction]:
         self.load()
         frames = self._load_frames(
             video_path,
             start_seconds=start_seconds,
             end_seconds=end_seconds,
+            focus_x=focus_x,
         )
         inputs = self._processor(frames, return_tensors="pt")
         inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}

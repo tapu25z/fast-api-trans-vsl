@@ -8,6 +8,8 @@ api.txt
 .env
 .env.*
 !.env.example
+data/kaggle_dataset
 data/kaggle_dataset/
 static/generated/*.mp4
 data/kaggle_download/
+models/*.task
